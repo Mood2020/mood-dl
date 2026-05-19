@@ -11,6 +11,17 @@ fi
 
 SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
 FORMAT="bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best"
+COMMON_FLAGS=(
+  --format "$FORMAT"
+  --merge-output-format mp4
+  --write-thumbnail
+  --convert-thumbnails jpg
+  --no-playlist
+  --no-part
+  --retries 5
+  --fragment-retries 5
+  --output "%(title)s.%(ext)s"
+)
 
 sanitize_name() {
   echo "$1" | sed 's/[[:space:]]\+/-/g' | tr -cd '[:alnum:]_.-'
@@ -18,6 +29,17 @@ sanitize_name() {
 
 urlencode() {
   python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$1"
+}
+
+normalize_youtube_url() {
+  local input="$1"
+  if [[ "$input" =~ youtu\.be/([a-zA-Z0-9_-]+) ]]; then
+    local id="${BASH_REMATCH[1]}"
+    id="${id%%\?*}"
+    echo "https://www.youtube.com/watch?v=${id}"
+  else
+    echo "$input"
+  fi
 }
 
 regenerate_master_readme() {
@@ -40,22 +62,49 @@ regenerate_master_readme() {
   done
 }
 
+download_video() {
+  local url="$1"
+  local tmp_dir="$2"
+
+  pushd "$tmp_dir" >/dev/null
+
+  local methods=(
+    "--extractor-args youtube:player_client=web --js-runtimes deno --remote-components ejs:github"
+    "--extractor-args youtube:player_client=web,mweb,android --js-runtimes deno --remote-components ejs:npm"
+    "--extractor-args youtube:player_client=mweb --js-runtimes deno"
+    "--extractor-args youtube:player_client=android"
+  )
+
+  local ok=1
+  for method in "${methods[@]}"; do
+    echo "Trying yt-dlp method: $method"
+    if yt-dlp "${COMMON_FLAGS[@]}" --newline --progress ${method} "$url"; then
+      ok=0
+      break
+    fi
+    sleep 2
+  done
+
+  popd >/dev/null
+  return $ok
+}
+
 index=0
-for url in "${URL_LIST[@]}"; do
+success_count=0
+for raw_url in "${URL_LIST[@]}"; do
   index=$((index+1))
+  url=$(normalize_youtube_url "$raw_url")
   tmp="/tmp/mood_dl_${index}"
   rm -rf "$tmp"
   mkdir -p "$tmp"
 
-  yt-dlp \
-    --format "$FORMAT" \
-    --merge-output-format mp4 \
-    --write-thumbnail \
-    --convert-thumbnails jpg \
-    --no-playlist \
-    --output "$tmp/%(title)s.%(ext)s" \
-    "$url"
+  if ! download_video "$url" "$tmp"; then
+    echo "Failed to download URL after all methods: $url"
+    rm -rf "$tmp"
+    continue
+  fi
 
+  success_count=$((success_count+1))
   find "$tmp" -name '*.part' -delete
 
   for f in "$tmp"/*; do
@@ -144,5 +193,10 @@ for url in "${URL_LIST[@]}"; do
 
   rm -rf "$tmp"
 done
+
+if [ "$success_count" -eq 0 ]; then
+  echo "All URLs failed to download. For bot checks, use cookies with yt-dlp if needed."
+  exit 1
+fi
 
 regenerate_master_readme
