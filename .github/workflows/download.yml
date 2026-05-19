@@ -42,8 +42,12 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip unzip jq bc
+          sudo apt-get install -y python3-pip ffmpeg zip unzip jq bc curl
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
           python3 -m pip install --upgrade yt-dlp
+          deno --version
+          yt-dlp --version
 
       - name: Download and package
         env:
