@@ -1,0 +1,81 @@
+name: Download Video (Permitted Content)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_urls:
+        description: "Video URLs separated by spaces"
+        required: true
+        type: string
+      quality:
+        description: "Max quality"
+        required: true
+        default: "360"
+        type: choice
+        options:
+          - "360"
+          - "480"
+          - "720"
+          - "1080"
+      split_mb:
+        description: "Split archive size (MB)"
+        required: true
+        default: "45"
+        type: string
+      commit_to_repo:
+        description: "Commit results into videos/"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip ffmpeg zip unzip jq bc curl
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --upgrade yt-dlp
+          deno --version
+          yt-dlp --version
+
+      - name: Download and package
+        env:
+          VIDEO_URLS: ${{ github.event.inputs.video_urls }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          SPLIT_MB: ${{ github.event.inputs.split_mb }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          bash scripts/download_and_package.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-videos
+          path: videos/
+          if-no-files-found: error
+
+      - name: Commit and push results
+        if: ${{ github.event.inputs.commit_to_repo == 'true' }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add videos
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Add downloaded video packages [skip ci]"
+          git push
