@@ -1,50 +1,176 @@
-name: 🎬 YouTube Pro Downloader
+name: 🎬 YouTube Ultra Downloader (Free & Unlocked)
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: 'لینک ویدیو (YouTube)'
+      video_urls:
+        description: '📥 لینک ویدیوها (چند لینک را با فاصله از هم جدا کنید)'
         required: true
         type: string
       quality:
-        description: 'کیفیت دانلود'
+        description: '🚀 انتخاب کیفیت ویدیو'
         required: true
         default: 'best'
         type: choice
         options:
           - 'best'
+          - '1080'
           - '720'
           - '480'
-          - 'audio'
+          - 'audio_mp3'
 
 jobs:
-  download:
+  download-youtube:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
     steps:
-      - name: Setup Environment
-        run: |
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          sudo apt-get install -y zip
-      
-      - name: Download Content
-        run: |
-          mkdir -p raw_dl chunks
-          cd raw_dl
-          if [ "${{ inputs.quality }}" == "audio" ]; then
-            yt-dlp -f "bestaudio" -x --audio-format mp3 "${{ inputs.url }}" -o "media.%(ext)s"
-          elif [ "${{ inputs.quality }}" == "best" ]; then
-            yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" "${{ inputs.url }}" -o "media.%(ext)s"
-          else
-            yt-dlp -f "bestvideo[height<=${{ inputs.quality }}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" "${{ inputs.url }}" -o "media.%(ext)s"
-          fi
-      
-      - name: Split and Zip (45MB chunks)
-        run: zip -s 45m -j chunks/Media.zip raw_dl/*
-          
-      - name: Upload to GitHub Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
         with:
-          name: YouTube-Download-${{ inputs.quality }}
-          path: chunks/
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git Settings
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Start Cloudflare WARP (Bypass Blocks)
+        run: |
+          echo "Starting WARP for bypassing YouTube IP blocks..."
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          echo "Waiting for WARP to connect..."
+          sleep 15
+
+      - name: Install Advanced Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip ffmpeg zip curl jq bc
+          curl -fsSL https://deno.land/install.sh | sh
+          export DENO_INSTALL="$HOME/.deno"
+          echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
+          pip3 install --upgrade yt-dlp
+
+      - name: Core Downloader Process
+        env:
+          YT_URLS: ${{ github.event.inputs.video_urls }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # تنظیم فرمت بر اساس انتخاب کاربر (بدون محدودیت نسخه تجاری!)
+          if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
+            FORMAT="bestaudio"
+          elif [ "${{ github.event.inputs.quality }}" == "best" ]; then
+            FORMAT="bestvideo+bestaudio/best"
+          else
+            FORMAT="bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]"
+          fi
+
+          read -ra URL_LIST <<< "$YT_URLS"
+          BACKUP_DIR="/tmp/unlocked_backup"
+          mkdir -p "$BACKUP_DIR"
+          mkdir -p videos
+
+          sanitize_name() {
+            echo "$1" | sed 's/[^a-zA-Z0-9آ-یضصثقفغعهخحجچپگکمنتلبیسشظطزرذددوؤئءأإ ]/-/g' | sed 's/ /-/g' | tr -s '-'
+          }
+
+          URL_INDEX=0
+          for URL in "${URL_LIST[@]}"; do
+            URL_INDEX=$((URL_INDEX + 1))
+            echo "Processing: $URL"
+            
+            TMP_DIR="tmp_dl_${URL_INDEX}"
+            mkdir -p "$TMP_DIR"
+
+            # استخراج نام ویدیو قبل از دانلود برای ساخت فولدر اختصاصی
+            TITLE_RAW=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title "$URL" 2>/dev/null || echo "video_${URL_INDEX}")
+            FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
+            
+            # ساخت پوشه اختصاصی ویدیو داخل پوشه اصلی videos
+            TARGET_FOLDER="$BACKUP_DIR/$FOLDER_NAME"
+            mkdir -p "$TARGET_FOLDER"
+
+            # اجرای دانلودر با متد شبیه‌ساز مرورگر و پروکسی وارپ
+            COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' --output ${TARGET_FOLDER}/%(title)s.%(ext)s"
+            
+            if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
+              yt-dlp $COMMON_FLAGS -f "$FORMAT" -x --audio-format mp3 "$URL"
+            else
+              yt-dlp $COMMON_FLAGS -f "$FORMAT" "$URL"
+            fi
+
+            # پارت‌بندی فایل‌های داخل پوشه در صورت بزرگ بودن از ۴۵ مگابایت
+            cd "$TARGET_FOLDER"
+            for FILE in *; do
+              [ -f "$FILE" ] || continue
+              SIZE=$(stat -c%s "$FILE")
+              SPLIT_BYTES=$(( 45 * 1024 * 1024 ))
+              
+              if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
+                echo "Splitting large file: $FILE"
+                zip -0 -s 45m "${FILE%.*}.zip" "$FILE"
+                rm "$FILE" # حذف فایل اصلی برای جاگیر نشدن
+              fi
+            done
+            cd -
+            rm -rf "$TMP_DIR"
+          done
+          
+          echo "$BACKUP_DIR" > /tmp/backup_path.txt
+
+      - name: Stop Cloudflare WARP
+        if: always()
+        run: docker stop warp && docker rm warp || true
+
+      - name: Commit Files to GitHub Repository
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          BACKUP_DIR=$(cat /tmp/backup_path.txt)
+          
+          if [ -z "$(ls -A $BACKUP_DIR 2>/dev/null)" ]; then
+            echo "No files downloaded. Exiting."
+            exit 0
+          fi
+
+          git fetch origin "$BRANCH"
+          git reset --hard origin/"$BRANCH"
+          
+          mkdir -p videos
+          cp -r "$BACKUP_DIR"/* videos/
+          
+          git add videos/
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "🎬 Added new downloaded videos to videos/ folder [skip ci]"
+            
+            # تلاش مجدد برای گیت پوش در صورت شلوغی سرور
+            FOR_RETRY=0
+            while [ $FOR_RETRY -lt 5 ]; do
+              FOR_RETRY=$((FOR_RETRY + 1))
+              if git push origin HEAD:"$BRANCH"; then
+                echo "Successfully saved to your repository!"
+                break
+              fi
+              sleep 5
+              git fetch origin "$BRANCH"
+              git rebase origin/"$BRANCH"
+            done
+          fi
