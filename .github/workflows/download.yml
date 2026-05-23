@@ -74,9 +74,9 @@ jobs:
 
           read -ra URL_LIST <<< "$YT_URLS"
           
-          # ساخت پوشه اصلی روی دیسک موقت سرور
-          TEMP_VIDEOS_DIR="/tmp/final_videos"
-          mkdir -p "$TEMP_VIDEOS_DIR"
+          # ساخت پوشه اصلی کار در محیط ایزوله سرور
+          TEMP_WORK_DIR="/tmp/isolated_downloads"
+          mkdir -p "$TEMP_WORK_DIR"
 
           sanitize_name() {
             echo "$1" | sed 's/[^a-zA-Z0-9آ-یضصثقفغعهخحجچپگکمنتلبیسشظطزرذددوؤئءأإ ]/-/g' | sed 's/ /-/g' | tr -s '-'
@@ -85,7 +85,6 @@ jobs:
           for URL in "${URL_LIST[@]}"; do
             echo "Processing URL: $URL"
             
-            # دریافت اطلاعات ویدیو به صورت JSON
             VIDEO_INFO=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --dump-json "$URL" 2>/dev/null || echo "")
             if [ -z "$VIDEO_INFO" ]; then
               echo "Failed to fetch video info for $URL. Skipping..."
@@ -97,15 +96,16 @@ jobs:
             DURATION_MIN=$(echo "scale=2; $DURATION_SEC / 60" | bc)
             
             FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
-            TARGET_FOLDER="$TEMP_VIDEOS_DIR/$FOLDER_NAME"
+            
+            # ایجاد یک فولدر کاملاً مستقل برای این ویدیو در دیسک موقت
+            TARGET_FOLDER="$TEMP_WORK_DIR/$FOLDER_NAME"
             mkdir -p "$TARGET_FOLDER"
 
-            # ۱. دانلود پوستر (Thumbnail)
+            # ۱. دانلود پوستر (Thumbnail) مستقیم داخل فولدر ویدیو
             yt-dlp --proxy "socks5://127.0.0.1:1080" --write-thumbnail --skip-download -o "$TARGET_FOLDER/thumbnail.%(ext)s" "$URL" || true
-            # تبدیل پسوند پوستر به jpg در صورت لزوم برای نمایش در ریپازیتوری
             mv "$TARGET_FOLDER"/thumbnail.* "$TARGET_FOLDER/thumbnail.jpg" 2>/dev/null || true
 
-            # ۲. دانلود خود ویدیو یا فایل صوتی
+            # ۲. دانلود خود ویدیو یا فایل صوتی داخل فولدر ویدیو
             COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' -o $TARGET_FOLDER/video.%(ext)s"
             
             if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
@@ -114,57 +114,51 @@ jobs:
               yt-dlp $COMMON_FLAGS -f "$FORMAT" "$URL"
             fi
 
-            # پیدا کردن فایل دانلود شده اصلی (ویدیو یا موزیک)
             DOWNLOADED_FILE=$(find "$TARGET_FOLDER" -type f ! -name "thumbnail.jpg" ! -name "README.md" | head -n 1)
             
             if [ -n "$DOWNLOADED_FILE" ]; then
               SIZE_BYTES=$(stat -c%s "$DOWNLOADED_FILE")
               SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
               
-              # ۳. ساخت فایلهای متنی مشخصات (README)
+              # ۳. ساخت فایل متنی مشخصات دقیق درون فولدر ویدیو
               cat << EOF > "$TARGET_FOLDER/README.md"
-          # 🎬 مشخصات و لینک دانلود ویدیو
+# 🎬 مشخصات و لینک دانلود ویدیو
 
-          <div align="center">
-            <img src="thumbnail.jpg" width="400" alt="Thumbnail">
-          </div>
+<div align="center">
+  <img src="thumbnail.jpg" width="400" alt="Thumbnail">
+</div>
 
-          ---
+---
 
-          | مشخصات | مقادیر |
-          | :--- | :--- |
-          | **تایتل اصلی** | $TITLE_RAW |
-          | **لینک یوتیوب** | [مشاهده در یوتیوب]($URL) |
-          | **مدت زمان** | $DURATION_MIN دقیقه |
-          | **حجم دقیق فایل** | $SIZE_MB مگابایت |
+| مشخصات | مقادیر |
+| :--- | :--- |
+| **تایتل اصلی** | $TITLE_RAW |
+| **لینک یوتیوب** | [مشاهده در یوتیوب]($URL) |
+| **مدت زمان** | $DURATION_MIN دقیقه |
+| **حجم دقیق فایل** | $SIZE_MB مگابایت |
 
-          ---
-          EOF
+---
+EOF
 
-              # ۴. بررسی حجم برای پارت‌بندی کردن فایلهای زیپ
+              # ۴. پارت‌بندی فایل‌های بزرگتر از ۴۵ مگابایت
               SPLIT_LIMIT=$(( 45 * 1024 * 1024 ))
               if [ "$SIZE_BYTES" -gt "$SPLIT_LIMIT" ]; then
                 echo "File is larger than 45MB ($SIZE_MB MB). Splitting into zip parts..."
                 cd "$TARGET_FOLDER"
                 
-                # ساخت فایل زیپ چندبخشی استاندارد (-s 45m)
                 zip -0 -s 45m "Video_Parts.zip" "$(basename "$DOWNLOADED_FILE")"
-                
-                # حذف فایل ویدیو اصلی برای آپلود نشدن در گیت‌هاب (فقط پارت‌ها بمانند)
                 rm "$(basename "$DOWNLOADED_FILE")"
                 cd -
                 
                 echo -e "\n### 📦 فایل‌های پارت‌بندی شده (حجم بالای ۴۵ مگابایت):\n" >> "$TARGET_FOLDER/README.md"
                 echo "لطفاً تمام پارت‌ها را دانلود کرده و فقط فایل \`Video_Parts.zip\` را اکسترکت کنید." >> "$TARGET_FOLDER/README.md"
-              else
-                echo "File size is $SIZE_MB MB (Under 45MB). Kept as original file."
               fi
             fi
           done
 
-          # انتقال فایل‌ها به پوشه اصلی ریپازیتوری
+          # انتقال پوشه‌ها به صورت کاملاً ساختاریافته به پوشه اصلی ریپازیتوری
           mkdir -p videos
-          cp -r "$TEMP_VIDEOS_DIR"/* videos/
+          cp -R "$TEMP_WORK_DIR"/* videos/
 
       - name: Stop Cloudflare WARP
         if: always()
@@ -180,7 +174,7 @@ jobs:
           git add videos/
           
           if ! git diff --cached --quiet; then
-            git commit -m "🎬 Added high-quality formatted videos with details [skip ci]"
+            git commit -m "🎬 Added high-quality formatted videos inside structured folders [skip ci]"
             
             FOR_RETRY=0
             while [ $FOR_RETRY -lt 5 ]; do
