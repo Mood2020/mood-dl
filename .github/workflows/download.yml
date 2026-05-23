@@ -80,12 +80,24 @@ jobs:
             echo "$1" | sed 's/[^a-zA-Z0-9آ-یضصثقفغعهخحجچپگکمنتلبیسشظطزرذددوؤئءأإ ]/-/g' | sed 's/ /-/g' | tr -s '-'
           }
 
+          DOWNLOAD_COUNT=0
+
           for URL in "${URL_LIST[@]}"; do
             echo "Processing URL: $URL"
             
-            VIDEO_INFO=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --dump-json "$URL" 2>/dev/null || echo "")
+            # تلاش برای دریافت اطلاعات با ۳ بار تکرار در صورت خطا
+            VIDEO_INFO=""
+            for i in {1..3}; do
+              VIDEO_INFO=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --dump-json "$URL" 2>/dev/null || echo "")
+              if [ -n "$VIDEO_INFO" ]; then
+                break
+              fi
+              echo "Retry $i: Failed to fetch info. Waiting..."
+              sleep 5
+            done
+
             if [ -z "$VIDEO_INFO" ]; then
-              echo "Failed to fetch video info for $URL. Skipping..."
+              echo "Failed to fetch video info for $URL after 3 attempts. Skipping..."
               continue
             fi
 
@@ -106,11 +118,12 @@ jobs:
               yt-dlp $COMMON_FLAGS -f "$FORMAT" -x --audio-format mp3 "$URL"
             else
               yt-dlp $COMMON_FLAGS -f "$FORMAT" "$URL"
-          fi
+            fi
 
             DOWNLOADED_FILE=$(find "$TARGET_FOLDER" -type f ! -name "thumbnail.jpg" ! -name "README.md" | head -n 1)
             
             if [ -n "$DOWNLOADED_FILE" ]; then
+              DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
               SIZE_BYTES=$(stat -c%s "$DOWNLOADED_FILE")
               SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
               
@@ -145,8 +158,13 @@ jobs:
             fi
           done
 
-          mkdir -p videos
-          cp -R "$TEMP_WORK_DIR"/* videos/
+          # کپی هوشمند: فقط در صورتی کپی انجام می‌شود که حداقل یک فایل دانلود شده باشد
+          if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
+            mkdir -p videos
+            cp -R "$TEMP_WORK_DIR"/* videos/
+          else
+            echo "No videos were successfully downloaded in this run."
+          fi
 
       - name: Stop Cloudflare WARP
         if: always()
@@ -157,18 +175,24 @@ jobs:
           BRANCH="${GITHUB_REF_NAME}"
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
-          git add videos/
-          if ! git diff --cached --quiet; then
-            git commit -m "🎬 Added high-quality formatted videos inside structured folders [skip ci]"
-            FOR_RETRY=0
-            while [ $FOR_RETRY -lt 5 ]; do
-              FOR_RETRY=$((FOR_RETRY + 1))
-              if git push origin HEAD:"$BRANCH"; then
-                echo "Successfully saved everything to your repository!"
-                break
-              fi
-              sleep 5
-              git fetch origin "$BRANCH"
-              git rebase origin/"$BRANCH"
-            done
+          
+          # بررسی وجود پوشه ویدیوها قبل از گیت کامیت
+          if [ -d "videos" ]; then
+            git add videos/
+            if ! git diff --cached --quiet; then
+              git commit -m "🎬 Added high-quality formatted videos inside structured folders [skip ci]"
+              FOR_RETRY=0
+              while [ $FOR_RETRY -lt 5 ]; do
+                FOR_RETRY=$((FOR_RETRY + 1))
+                if git push origin HEAD:"$BRANCH"; then
+                  echo "Successfully saved everything to your repository!"
+                  break
+                fi
+                sleep 5
+                git fetch origin "$BRANCH"
+                git rebase origin/"$BRANCH"
+              done
+            fi
+          else
+            echo "No new files to commit."
           fi
