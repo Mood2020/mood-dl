@@ -1,4 +1,4 @@
-name: 🎬 YouTube Ultra Downloader (Free & Unlocked)
+name: 🎬 YouTube Ultimate Downloader (Pro Version)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,6 @@ on:
           - '480'
           - 'audio_mp3'
 
-# تنظیم متغیر محیطی برای اجبار سرور به استفاده از Node 24 و حذف اخطار
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
@@ -32,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4.2.2 # آپدیت شده برای سازگاری کامل با جاوااسکریپت جدید
+        uses: actions/checkout@v4.2.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -47,19 +46,9 @@ jobs:
 
       - name: Start Cloudflare WARP (Bypass Blocks)
         run: |
-          echo "Starting WARP for bypassing YouTube IP blocks..."
+          echo "Starting WARP..."
           docker network create warp-net || true
-          docker run -d \
-            --name warp \
-            --restart=always \
-            --network warp-net \
-            -p 1080:1080 \
-            --cap-add NET_ADMIN \
-            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-            -v warp-data:/var/lib/cloudflare-warp \
-            caomingjun/warp
-          echo "Waiting for WARP to connect..."
+          docker run -d --name warp --restart=always --network warp-net -p 1080:1080 --cap-add NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv4.conf.all.src_valid_mark=1 -v warp-data:/var/lib/cloudflare-warp caomingjun/warp
           sleep 15
 
       - name: Install Advanced Dependencies
@@ -74,9 +63,6 @@ jobs:
       - name: Core Downloader Process
         env:
           YT_URLS: ${{ github.event.inputs.video_urls }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          BRANCH: ${{ github.ref_name }}
         run: |
           if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
             FORMAT="bestaudio"
@@ -87,29 +73,40 @@ jobs:
           fi
 
           read -ra URL_LIST <<< "$YT_URLS"
-          BACKUP_DIR="/tmp/unlocked_backup"
-          mkdir -p "$BACKUP_DIR"
-          mkdir -p videos
+          
+          # ساخت پوشه اصلی روی دیسک موقت سرور
+          TEMP_VIDEOS_DIR="/tmp/final_videos"
+          mkdir -p "$TEMP_VIDEOS_DIR"
 
           sanitize_name() {
             echo "$1" | sed 's/[^a-zA-Z0-9آ-یضصثقفغعهخحجچپگکمنتلبیسشظطزرذددوؤئءأإ ]/-/g' | sed 's/ /-/g' | tr -s '-'
           }
 
-          URL_INDEX=0
           for URL in "${URL_LIST[@]}"; do
-            URL_INDEX=$((URL_INDEX + 1))
-            echo "Processing: $URL"
+            echo "Processing URL: $URL"
             
-            TMP_DIR="tmp_dl_${URL_INDEX}"
-            mkdir -p "$TMP_DIR"
+            # دریافت اطلاعات ویدیو به صورت JSON
+            VIDEO_INFO=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --dump-json "$URL" 2>/dev/null || echo "")
+            if [ -z "$VIDEO_INFO" ]; then
+              echo "Failed to fetch video info for $URL. Skipping..."
+              continue
+            fi
 
-            TITLE_RAW=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title "$URL" 2>/dev/null || echo "video_${URL_INDEX}")
-            FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
+            TITLE_RAW=$(echo "$VIDEO_INFO" | jq -r '.title')
+            DURATION_SEC=$(echo "$VIDEO_INFO" | jq -r '.duration')
+            DURATION_MIN=$(echo "scale=2; $DURATION_SEC / 60" | bc)
             
-            TARGET_FOLDER="$BACKUP_DIR/$FOLDER_NAME"
+            FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
+            TARGET_FOLDER="$TEMP_VIDEOS_DIR/$FOLDER_NAME"
             mkdir -p "$TARGET_FOLDER"
 
-            COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' --output ${TARGET_FOLDER}/%(title)s.%(ext)s"
+            # ۱. دانلود پوستر (Thumbnail)
+            yt-dlp --proxy "socks5://127.0.0.1:1080" --write-thumbnail --skip-download -o "$TARGET_FOLDER/thumbnail.%(ext)s" "$URL" || true
+            # تبدیل پسوند پوستر به jpg در صورت لزوم برای نمایش در ریپازیتوری
+            mv "$TARGET_FOLDER"/thumbnail.* "$TARGET_FOLDER/thumbnail.jpg" 2>/dev/null || true
+
+            # ۲. دانلود خود ویدیو یا فایل صوتی
+            COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' -o $TARGET_FOLDER/video.%(ext)s"
             
             if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
               yt-dlp $COMMON_FLAGS -f "$FORMAT" -x --audio-format mp3 "$URL"
@@ -117,23 +114,57 @@ jobs:
               yt-dlp $COMMON_FLAGS -f "$FORMAT" "$URL"
             fi
 
-            cd "$TARGET_FOLDER"
-            for FILE in *; do
-              [ -f "$FILE" ] || continue
-              SIZE=$(stat -c%s "$FILE")
-              SPLIT_BYTES=$(( 45 * 1024 * 1024 ))
+            # پیدا کردن فایل دانلود شده اصلی (ویدیو یا موزیک)
+            DOWNLOADED_FILE=$(find "$TARGET_FOLDER" -type f ! -name "thumbnail.jpg" ! -name "README.md" | head -n 1)
+            
+            if [ -n "$DOWNLOADED_FILE" ]; then
+              SIZE_BYTES=$(stat -c%s "$DOWNLOADED_FILE")
+              SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
               
-              if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
-                echo "Splitting large file: $FILE"
-                zip -0 -s 45m "${FILE%.*}.zip" "$FILE"
-                rm "$FILE"
+              # ۳. ساخت فایلهای متنی مشخصات (README)
+              cat << EOF > "$TARGET_FOLDER/README.md"
+          # 🎬 مشخصات و لینک دانلود ویدیو
+
+          <div align="center">
+            <img src="thumbnail.jpg" width="400" alt="Thumbnail">
+          </div>
+
+          ---
+
+          | مشخصات | مقادیر |
+          | :--- | :--- |
+          | **تایتل اصلی** | $TITLE_RAW |
+          | **لینک یوتیوب** | [مشاهده در یوتیوب]($URL) |
+          | **مدت زمان** | $DURATION_MIN دقیقه |
+          | **حجم دقیق فایل** | $SIZE_MB مگابایت |
+
+          ---
+          EOF
+
+              # ۴. بررسی حجم برای پارت‌بندی کردن فایلهای زیپ
+              SPLIT_LIMIT=$(( 45 * 1024 * 1024 ))
+              if [ "$SIZE_BYTES" -gt "$SPLIT_LIMIT" ]; then
+                echo "File is larger than 45MB ($SIZE_MB MB). Splitting into zip parts..."
+                cd "$TARGET_FOLDER"
+                
+                # ساخت فایل زیپ چندبخشی استاندارد (-s 45m)
+                zip -0 -s 45m "Video_Parts.zip" "$(basename "$DOWNLOADED_FILE")"
+                
+                # حذف فایل ویدیو اصلی برای آپلود نشدن در گیت‌هاب (فقط پارت‌ها بمانند)
+                rm "$(basename "$DOWNLOADED_FILE")"
+                cd -
+                
+                echo -e "\n### 📦 فایل‌های پارت‌بندی شده (حجم بالای ۴۵ مگابایت):\n" >> "$TARGET_FOLDER/README.md"
+                echo "لطفاً تمام پارت‌ها را دانلود کرده و فقط فایل \`Video_Parts.zip\` را اکسترکت کنید." >> "$TARGET_FOLDER/README.md"
+              else
+                echo "File size is $SIZE_MB MB (Under 45MB). Kept as original file."
               fi
-            done
-            cd -
-            rm -rf "$TMP_DIR"
+            fi
           done
-          
-          echo "$BACKUP_DIR" > /tmp/backup_path.txt
+
+          # انتقال فایل‌ها به پوشه اصلی ریپازیتوری
+          mkdir -p videos
+          cp -r "$TEMP_VIDEOS_DIR"/* videos/
 
       - name: Stop Cloudflare WARP
         if: always()
@@ -142,29 +173,20 @@ jobs:
       - name: Commit Files to GitHub Repository
         run: |
           BRANCH="${GITHUB_REF_NAME}"
-          BACKUP_DIR=$(cat /tmp/backup_path.txt)
           
-          if [ -z "$(ls -A $BACKUP_DIR 2>/dev/null)" ]; then
-            echo "No files downloaded. Exiting."
-            exit 0
-          fi
-
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
-          
-          mkdir -p videos
-          cp -r "$BACKUP_DIR"/* videos/
           
           git add videos/
           
           if ! git diff --cached --quiet; then
-            git commit -m "🎬 Added new downloaded videos to videos/ folder [skip ci]"
+            git commit -m "🎬 Added high-quality formatted videos with details [skip ci]"
             
             FOR_RETRY=0
             while [ $FOR_RETRY -lt 5 ]; do
               FOR_RETRY=$((FOR_RETRY + 1))
               if git push origin HEAD:"$BRANCH"; then
-                echo "Successfully saved to your repository!"
+                echo "Successfully saved everything to your repository!"
                 break
               fi
               sleep 5
