@@ -54,7 +54,7 @@ jobs:
       - name: Install Advanced Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip curl jq bc
+          sudo apt-get install -y ffmpeg python3-pip zip curl jq bc
           curl -fsSL https://deno.land/install.sh | sh
           export DENO_INSTALL="$HOME/.deno"
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
@@ -64,8 +64,11 @@ jobs:
         env:
           YT_URLS: ${{ github.event.inputs.video_urls }}
         run: |
+          # اطمینان از دسترسی کامل ابزار دانلود به FFmpeg سیستم برای چسباندن صدا به تصویر
+          export PATH=$PATH:/usr/bin/ffmpeg
+          
           if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
-            FORMAT="bestaudio"
+            FORMAT="bestaudio/best"
           elif [ "${{ github.event.inputs.quality }}" == "best" ]; then
             FORMAT="bestvideo+bestaudio/best"
           else
@@ -73,19 +76,17 @@ jobs:
           fi
 
           read -ra URL_LIST <<< "$YT_URLS"
-          TEMP_WORK_DIR="/tmp/isolated_downloads"
-          mkdir -p "$TEMP_WORK_DIR"
+          
+          # ساخت مستقیم پوشه دانلود در محیط لوکال پروژه برای رفع مشکل فولدربندی
+          mkdir -p videos
 
           sanitize_name() {
             echo "$1" | sed 's/[^a-zA-Z0-9آ-یضصثقفغعهخحجچپگکمنتلبیسشظطزرذددوؤئءأإ ]/-/g' | sed 's/ /-/g' | tr -s '-'
           }
 
-          DOWNLOAD_COUNT=0
-
           for URL in "${URL_LIST[@]}"; do
             echo "Processing URL: $URL"
             
-            # تلاش برای دریافت اطلاعات با ۳ بار تکرار در صورت خطا
             VIDEO_INFO=""
             for i in {1..3}; do
               VIDEO_INFO=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --dump-json "$URL" 2>/dev/null || echo "")
@@ -97,7 +98,7 @@ jobs:
             done
 
             if [ -z "$VIDEO_INFO" ]; then
-              echo "Failed to fetch video info for $URL after 3 attempts. Skipping..."
+              echo "Failed to fetch video info for $URL. Skipping..."
               continue
             fi
 
@@ -106,13 +107,15 @@ jobs:
             DURATION_MIN=$(echo "scale=2; $DURATION_SEC / 60" | bc)
             
             FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
-            TARGET_FOLDER="$TEMP_WORK_DIR/$FOLDER_NAME"
+            TARGET_FOLDER="videos/$FOLDER_NAME"
             mkdir -p "$TARGET_FOLDER"
 
+            # دانلود تامبنیل
             yt-dlp --proxy "socks5://127.0.0.1:1080" --write-thumbnail --skip-download -o "$TARGET_FOLDER/thumbnail.%(ext)s" "$URL" || true
             mv "$TARGET_FOLDER"/thumbnail.* "$TARGET_FOLDER/thumbnail.jpg" 2>/dev/null || true
 
-            COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' -o $TARGET_FOLDER/video.%(ext)s"
+            # دانلود ویدیو با فرمت ادغامیِ ویدیو + صدا به کمک FFmpeg
+            COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --ffmpeg-location /usr/bin/ffmpeg --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' -o $TARGET_FOLDER/video.%(ext)s"
             
             if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
               yt-dlp $COMMON_FLAGS -f "$FORMAT" -x --audio-format mp3 "$URL"
@@ -123,7 +126,6 @@ jobs:
             DOWNLOADED_FILE=$(find "$TARGET_FOLDER" -type f ! -name "thumbnail.jpg" ! -name "README.md" | head -n 1)
             
             if [ -n "$DOWNLOADED_FILE" ]; then
-              DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
               SIZE_BYTES=$(stat -c%s "$DOWNLOADED_FILE")
               SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
               
@@ -158,14 +160,6 @@ jobs:
             fi
           done
 
-          # کپی هوشمند: فقط در صورتی کپی انجام می‌شود که حداقل یک فایل دانلود شده باشد
-          if [ "$DOWNLOAD_COUNT" -gt 0 ]; then
-            mkdir -p videos
-            cp -R "$TEMP_WORK_DIR"/* videos/
-          else
-            echo "No videos were successfully downloaded in this run."
-          fi
-
       - name: Stop Cloudflare WARP
         if: always()
         run: docker stop warp && docker rm warp || true
@@ -176,11 +170,10 @@ jobs:
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
           
-          # بررسی وجود پوشه ویدیوها قبل از گیت کامیت
           if [ -d "videos" ]; then
             git add videos/
             if ! git diff --cached --quiet; then
-              git commit -m "🎬 Added high-quality formatted videos inside structured folders [skip ci]"
+              git commit -m "🎬 Fix audio sync and strict folder mapping [skip ci]"
               FOR_RETRY=0
               while [ $FOR_RETRY -lt 5 ]; do
                 FOR_RETRY=$((FOR_RETRY + 1))
@@ -193,6 +186,4 @@ jobs:
                 git rebase origin/"$BRANCH"
               done
             fi
-          else
-            echo "No new files to commit."
           fi
