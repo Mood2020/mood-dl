@@ -19,6 +19,10 @@ on:
           - '480'
           - 'audio_mp3'
 
+# تنظیم متغیر محیطی برای اجبار سرور به استفاده از Node 24 و حذف اخطار
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   download-youtube:
     runs-on: ubuntu-latest
@@ -28,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2 # آپدیت شده برای سازگاری کامل با جاوااسکریپت جدید
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -74,7 +78,6 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           BRANCH: ${{ github.ref_name }}
         run: |
-          # تنظیم فرمت بر اساس انتخاب کاربر (بدون محدودیت نسخه تجاری!)
           if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
             FORMAT="bestaudio"
           elif [ "${{ github.event.inputs.quality }}" == "best" ]; then
@@ -100,15 +103,12 @@ jobs:
             TMP_DIR="tmp_dl_${URL_INDEX}"
             mkdir -p "$TMP_DIR"
 
-            # استخراج نام ویدیو قبل از دانلود برای ساخت فولدر اختصاصی
             TITLE_RAW=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title "$URL" 2>/dev/null || echo "video_${URL_INDEX}")
             FOLDER_NAME=$(sanitize_name "$TITLE_RAW")
             
-            # ساخت پوشه اختصاصی ویدیو داخل پوشه اصلی videos
             TARGET_FOLDER="$BACKUP_DIR/$FOLDER_NAME"
             mkdir -p "$TARGET_FOLDER"
 
-            # اجرای دانلودر با متد شبیه‌ساز مرورگر و پروکسی وارپ
             COMMON_FLAGS="--proxy socks5://127.0.0.1:1080 --merge-output-format mp4 --no-cache-dir --no-part --no-playlist --retries 5 --js-runtimes deno --remote-components ejs:github --user-agent 'Mozilla/5.0' --output ${TARGET_FOLDER}/%(title)s.%(ext)s"
             
             if [ "${{ github.event.inputs.quality }}" == "audio_mp3" ]; then
@@ -117,7 +117,6 @@ jobs:
               yt-dlp $COMMON_FLAGS -f "$FORMAT" "$URL"
             fi
 
-            # پارت‌بندی فایل‌های داخل پوشه در صورت بزرگ بودن از ۴۵ مگابایت
             cd "$TARGET_FOLDER"
             for FILE in *; do
               [ -f "$FILE" ] || continue
@@ -127,7 +126,7 @@ jobs:
               if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
                 echo "Splitting large file: $FILE"
                 zip -0 -s 45m "${FILE%.*}.zip" "$FILE"
-                rm "$FILE" # حذف فایل اصلی برای جاگیر نشدن
+                rm "$FILE"
               fi
             done
             cd -
@@ -161,7 +160,6 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "🎬 Added new downloaded videos to videos/ folder [skip ci]"
             
-            # تلاش مجدد برای گیت پوش در صورت شلوغی سرور
             FOR_RETRY=0
             while [ $FOR_RETRY -lt 5 ]; do
               FOR_RETRY=$((FOR_RETRY + 1))
